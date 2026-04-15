@@ -28,3 +28,18 @@ cat > $PREFIX/etc/conda/env_vars.d/$PKG_NAME-$PKG_VERSION.json << EOF
   "BLENDER_DATAFILES_PATH": "$PREFIX/opt/blender/$BLENDER_VERSION/datafiles"
 }
 EOF
+
+# --- Simple Plugin Delivery (Option D: per-DCC recipe activate script) ---
+# Copies the plugin delivery scripts into the conda activate.d/deactivate.d
+# directories. These run AFTER the main blender env vars are set (999- prefix
+# ensures lexicographic ordering).
+#
+# See 999-blender-simple-plugins-activate.sh for the full implementation.
+
+mkdir -p $PREFIX/etc/conda/activate.d
+cp $RECIPE_DIR/999-blender-simple-plugins-activate.sh \
+   $PREFIX/etc/conda/activate.d/999-$PKG_NAME-simple-plugins.sh
+
+mkdir -p $PREFIX/etc/conda/deactivate.d
+cp $RECIPE_DIR/999-blender-simple-plugins-deactivate.sh \
+   $PREFIX/etc/conda/deactivate.d/999-$PKG_NAME-simple-plugins.sh
