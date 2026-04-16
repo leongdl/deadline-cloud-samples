@@ -115,23 +115,26 @@ ${_SP_ADDON_LIST}]
 
 def _auto_enable():
     for module_name in _ADDONS:
+        addons_dir = os.path.join(os.environ.get("BLENDER_USER_SCRIPTS", ""), "addons")
+        # Determine the install source: directory __init__.py or .zip
+        init_path = os.path.join(addons_dir, module_name, "__init__.py")
+        zip_path = os.path.join(addons_dir, module_name + ".zip")
+        install_path = None
+        if os.path.isfile(init_path):
+            install_path = init_path
+        elif os.path.isfile(zip_path):
+            install_path = zip_path
+
         try:
-            # First try enabling directly (works if addon was previously installed)
+            # Install first so the addon is registered in Blender's preferences
+            # collection. Some addons (e.g. FLIP Fluids) access their own
+            # preferences during register() and crash if this step is skipped.
+            if install_path:
+                bpy.ops.preferences.addon_install(filepath=install_path, overwrite=True)
             addon_utils.enable(module_name, default_set=True)
             print(f"Simple Plugins: Enabled addon '{module_name}'")
-        except Exception as e1:
-            # If direct enable fails, try installing from zip first
-            addons_dir = os.path.join(os.environ.get("BLENDER_USER_SCRIPTS", ""), "addons")
-            zip_path = os.path.join(addons_dir, module_name + ".zip")
-            if os.path.isfile(zip_path):
-                try:
-                    bpy.ops.preferences.addon_install(filepath=zip_path)
-                    addon_utils.enable(module_name, default_set=True)
-                    print(f"Simple Plugins: Installed and enabled addon '{module_name}' from zip")
-                except Exception as e2:
-                    print(f"Simple Plugins: WARNING - Failed to install addon '{module_name}': {e2}")
-            else:
-                print(f"Simple Plugins: WARNING - Failed to enable addon '{module_name}': {e1}")
+        except Exception as e:
+            print(f"Simple Plugins: WARNING - Failed to enable addon '{module_name}': {e}")
 
 _auto_enable()
 PYEOF
