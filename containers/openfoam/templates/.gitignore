@@ -1,0 +1,3 @@
+# The session root: session working directories, cloned and solved case
+# directories, VTK output and run logs. All generated, none of it belongs in git.
+sessions/

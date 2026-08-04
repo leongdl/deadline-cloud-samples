@@ -1,0 +1,264 @@
+# OpenFOAM CFD job — Open Job Description 2023-09, EXPR extension.
+#
+# Nothing in this template mentions docker. The commands below are written as if
+# they already run inside the openfoam-ubuntu container, and the WRAP_ACTIONS
+# environment in local-docker-wrap-env.yaml is what actually puts them there: it
+# intercepts each action and re-executes it via `docker run`, forwarding command
+# and args verbatim with EXPR's repr_sh().
+#
+# The job is a Reynolds number sweep of the lid-driven cavity, OpenFOAM's
+# hello-world case. It follows the standard CFD shape of mesh once, solve many,
+# post-process once, which maps onto the three WRAP_ACTIONS hooks:
+#
+#   FoamCase onEnter  -> onWrapEnvEnter  clone the tutorial, run blockMesh
+#   Solve    onRun    -> onWrapTaskRun   one solver run per viscosity
+#   FoamCase onExit   -> onWrapEnvExit   convert to VTK, write the summary
+#
+# Run it with run-simulation.sh, which supplies the parameters below and applies
+# the wrap environment. Manual equivalent:
+#
+#   openjd run openfoam-solve-job.yaml \
+#       --environment local-docker-wrap-env.yaml \
+#       -p SessionsDir=<abs path to ./sessions> \
+#       -p ContainerMount=/mnt/session \
+#       -p RunPrefix=python
+#
+specificationVersion: jobtemplate-2023-09
+
+# EXPR provides the `let` bindings used below. WRAP_ACTIONS is declared by the
+# environment template, not here — this job is deliberately unaware of it.
+extensions:
+- EXPR
+
+name: OpenFOAMSolve
+description: Solves an OpenFOAM tutorial case over a viscosity sweep inside a container via WRAP_ACTIONS.
+
+parameterDefinitions:
+# ContainerMount is declared in BOTH this template and local-docker-wrap-env.yaml,
+# with the same type and default. That is legal: the CLI merges job and
+# environment template parameter definitions into one parameter space, and
+# definitions of the same name must agree on type (the last default wins). One
+# `-p ContainerMount=...` therefore moves the bind-mount target and the paths
+# below together, so the two templates cannot drift apart.
+- name: ContainerMount
+  type: STRING
+  default: /mnt/session
+  description: Where the host session directory is mounted inside the container.
+
+# In-container paths are STRING, not PATH, on purpose. PATH parameters are
+# resolved and validated against the *host* filesystem (and are subject to path
+# mapping), which would rewrite or reject a container-only path.
+- name: CasesSubdir
+  type: STRING
+  default: cases
+  description: Where case directories are created, relative to ContainerMount.
+
+- name: OutputSubdir
+  type: STRING
+  default: output
+  description: Where the summary and the PNG plots are written, relative to ContainerMount.
+
+# Resolved against $FOAM_TUTORIALS inside the container, so the tutorial tree
+# that ships in the image is the only source of case definitions — nothing has
+# to be downloaded.
+- name: Tutorial
+  type: STRING
+  default: incompressible/icoFoam/cavity/cavity
+  description: >-
+    Tutorial case to clone, relative to $FOAM_TUTORIALS. Must be a case whose
+    whole setup is blockMesh plus the solver, and which has an `nu` entry in
+    constant/transportProperties for the sweep to modify.
+
+- name: Solver
+  type: STRING
+  default: icoFoam
+  description: >-
+    OpenFOAM solver to run. Must match Tutorial — icoFoam for cavity,
+    simpleFoam for pitzDaily, and so on.
+
+- name: RunPrefix
+  type: STRING
+  default: run
+  description: Names the case directory and the output files, so separate runs do not overwrite each other.
+
+# The tutorial stops at 0.5 s, which is too early for this sweep to mean
+# anything: viscous momentum diffuses across the 0.1 m cavity on a timescale of
+# L^2/nu, between 1 s and 10 s for the viscosities below. Sampled at 0.5 s all
+# three cases are still in the same early transient and their velocity profiles
+# lie on top of each other. Ten seconds is past that for every case.
+- name: EndTime
+  type: FLOAT
+  default: 10
+  minValue: 0.005
+  description: Simulated seconds to run, overriding the tutorial's endTime.
+
+# The mesh is shared by every task, so it is built once when the environment is
+# entered rather than repeated per task. Because this environment sits inside
+# the wrap environment, its onEnter and onExit are themselves intercepted and
+# run in the container — which is the only reason blockMesh and foamToVTK are
+# found at all.
+jobEnvironments:
+- name: FoamCase
+  script:
+    let:
+    - run_dir = Param.ContainerMount + '/' + Param.CasesSubdir + '/' + Param.RunPrefix
+    - base_case = Param.ContainerMount + '/' + Param.CasesSubdir + '/' + Param.RunPrefix + '/base'
+    - output_dir = Param.ContainerMount + '/' + Param.OutputSubdir
+    - summary_file = Param.ContainerMount + '/' + Param.OutputSubdir + '/' + Param.RunPrefix + '-summary.txt'
+    actions:
+      onEnter:
+        command: bash
+        args:
+        - -c
+        - |
+          set -euo pipefail
+
+          tutorial="$FOAM_TUTORIALS/{{ Param.Tutorial }}"
+          if [ ! -d "$tutorial" ]; then
+              echo "no tutorial case at $tutorial" >&2
+              exit 1
+          fi
+
+          mkdir -p "{{ run_dir }}"
+          rm -rf "{{ base_case }}"
+
+          # foamCloneCase copies only the case definition - the first time
+          # directory, constant/ and system/ - so the read-only tutorial tree
+          # inside the image is never touched.
+          foamCloneCase "$tutorial" "{{ base_case }}"
+
+          cd "{{ base_case }}"
+          if ! blockMesh > log.blockMesh 2>&1; then
+              echo "blockMesh failed:" >&2
+              tail -40 log.blockMesh >&2
+              exit 1
+          fi
+          echo "meshed {{ base_case }}"
+          grep -E '^ *n(Points|Cells|Faces):' log.blockMesh
+
+      onExit:
+        command: bash
+        args:
+        - -c
+        - |
+          set -euo pipefail
+          shopt -s nullglob
+
+          summary="{{ summary_file }}"
+          output_dir="{{ output_dir }}"
+          mkdir -p "$output_dir"
+
+          {
+              echo "OpenFOAM   $WM_PROJECT_VERSION"
+              echo "tutorial   {{ Param.Tutorial }}"
+              echo "solver     {{ Param.Solver }}"
+              echo "run        {{ Param.RunPrefix }}"
+              echo
+              printf '%-12s %-10s %-10s %s\n' CASE NU END_TIME VTK_TIMES
+          } > "$summary"
+
+          cd "{{ run_dir }}"
+          for dir in nu-*/; do
+              dir="${dir%/}"
+              (
+                  cd "$dir"
+                  # -latestTime converts only the final state; drop it to get
+                  # every written time step for an animation.
+                  foamToVTK -latestTime > log.foamToVTK 2>&1
+                  printf '%-12s %-10s %-10s %s\n' \
+                      "$dir" \
+                      "$(foamDictionary -entry nu -value constant/transportProperties)" \
+                      "$(foamListTimes -latestTime)" \
+                      "$(ls -d VTK/*/ 2>/dev/null | wc -l)"
+              ) >> "$summary"
+          done
+
+          cat "$summary"
+
+          # VTK output is data, not a picture. foam-plot turns it into PNGs: one
+          # velocity field per case, plus one graph comparing all of them. It
+          # comes from the image (see ../ubuntu-cpu/scripts/foam_plot.py) rather
+          # than from an OpenJD embeddedFile, because an embedded file
+          # materialises at a host path the container cannot see.
+          for dir in nu-*/; do
+              dir="${dir%/}"
+              foam-plot field \
+                  "$output_dir/{{ Param.RunPrefix }}-$dir-velocity.png" \
+                  "{{ run_dir }}/$dir"
+          done
+
+          # One graph over every case is the point of a sweep, so this runs once
+          # here rather than per task — and it is only possible here, because a
+          # task can only see its own case.
+          foam-plot profile \
+              "$output_dir/{{ Param.RunPrefix }}-centreline.png" \
+              nu-*/
+
+steps:
+- name: Solve
+  parameterSpace:
+    # One task per kinematic viscosity. With the cavity's 0.1 m lid moving at
+    # 1 m/s these are Reynolds numbers 10, 50 and 100. Viscosity is swept rather
+    # than lid velocity because it leaves the Courant number untouched, so every
+    # task stays stable at the tutorial's fixed time step.
+    #
+    # 100 is the top of the range on purpose: it is the lowest case in the
+    # standard Ghia benchmark and the 20x20 tutorial mesh resolves it acceptably.
+    # Higher Reynolds numbers need a finer or graded mesh — the cavityGrade
+    # tutorial — before the answer means much.
+    taskParameterDefinitions:
+    - name: Viscosity
+      type: FLOAT
+      range:
+      - 0.01
+      - 0.002
+      - 0.001
+  script:
+    # EXPR let bindings. These live at script level rather than step level
+    # because they reference Task.Param.*, which step-level `let` cannot see.
+    # Binding names must be lowercase per the EXPR spec.
+    let:
+    - base_case = Param.ContainerMount + '/' + Param.CasesSubdir + '/' + Param.RunPrefix + '/base'
+    - task_case = Param.ContainerMount + '/' + Param.CasesSubdir + '/' + Param.RunPrefix + '/nu-' + string(Task.Param.Viscosity)
+    actions:
+      onRun:
+        # This is the in-container invocation. The wrap hook receives it as
+        # WrappedAction.Command / WrappedAction.Args and forwards it verbatim.
+        command: bash
+        args:
+        - -c
+        - |
+          set -euo pipefail
+
+          # Each task gets its own copy of the meshed case, so tasks never write
+          # to the same files and can run on separate hosts.
+          rm -rf "{{ task_case }}"
+          cp -a "{{ base_case }}" "{{ task_case }}"
+          cd "{{ task_case }}"
+
+          echo "solving {{ task_case }}"
+
+          # foamDictionary reports each entry it writes on stderr, which openjd
+          # captures alongside stdout — those lines are the confirmation that
+          # this task's settings were applied.
+          foamDictionary -entry nu -set "{{ Task.Param.Viscosity }}" \
+              constant/transportProperties
+          foamDictionary -entry endTime -set "{{ Param.EndTime }}" system/controlDict
+
+          # Keep the number of written time directories fixed however long the
+          # run is, so the case does not fill with output nobody reads. `bc`
+          # because the time step is a decimal and the shell only does integers.
+          steps=$(echo "{{ Param.EndTime }} / \
+              $(foamDictionary -entry deltaT -value system/controlDict)" | bc)
+          foamDictionary -entry writeInterval -set "$((steps / 5))" system/controlDict
+
+          # OpenFOAM convention is a log file per application, kept beside the
+          # case. Only the timing line is echoed on success; the whole tail goes
+          # to stderr on failure, where it is worth reading.
+          log="log.{{ Param.Solver }}"
+          if ! {{ Param.Solver }} > "$log" 2>&1; then
+              echo "{{ Param.Solver }} failed:" >&2
+              tail -40 "$log" >&2
+              exit 1
+          fi
+          grep '^ExecutionTime' "$log" | tail -1

@@ -1,0 +1,167 @@
+# Container wrap environment for LOCAL runs — WRAP_ACTIONS + EXPR.
+#
+# "local" as in this workstation: it shells out to the docker CLI on the machine
+# running openjd, and bind mounts a host directory. It is applied ad hoc with
+# `openjd run --environment ...` (see run-simulation.sh). On a render farm the
+# same WRAP_ACTIONS hooks would normally arrive as a queue environment managed
+# by the farm rather than from a file next to the job.
+#
+# This is the piece that puts the job inside a container. WRAP_ACTIONS lets an
+# environment replace the lifecycle actions of everything inside it: each hook
+# below runs *instead of* the action it wraps, receiving the original action
+# through the WrappedAction.* variables. Here every hook re-runs the original
+# command inside openfoam-ubuntu, with the host session directory bind mounted
+# so the meshed case, the solver output and the VTK conversion all land back on
+# the host.
+#
+# All three hooks must be defined together — WRAP_ACTIONS is all-or-nothing —
+# and only one environment in a session may define them.
+#
+# This file is deliberately near-identical to the MoonRay sample's wrap
+# environment. The application-specific parts of that one — `--cap-add
+# SYS_NICE` for MoonRay's NUMA allocations — are not needed here; OpenFOAM runs
+# fine under Docker's default seccomp profile.
+specificationVersion: environment-2023-09
+
+extensions:
+- WRAP_ACTIONS
+- EXPR
+
+parameterDefinitions:
+# The host directory to bind mount. PATH (not STRING) so that a relative
+# default resolves against this template's directory, giving ./sessions without
+# anyone hardcoding an absolute path. run-simulation.sh passes an absolute path
+# explicitly rather than relying on that resolution.
+- name: SessionsDir
+  type: PATH
+  default: sessions
+  description: Host directory exposed to the container; holds cases/, output/ and the session working dirs.
+
+# Also declared in openfoam-solve-job.yaml with the same type and default, so
+# one -p sets the mount target and the job's in-container paths together.
+- name: ContainerMount
+  type: STRING
+  default: /mnt/session
+  description: Mount point for SessionsDir inside the container.
+
+- name: Image
+  type: STRING
+  default: openfoam-ubuntu
+  description: Container image holding the OpenFOAM install.
+
+- name: Platform
+  type: STRING
+  default: linux/amd64
+  description: >-
+    The image installs the repository's amd64 packages, so it is x86_64 only.
+    OpenCFD also publishes arm64 debs; an arm64 image would need the Dockerfile's
+    apt source arch changed to match.
+
+- name: DockerUser
+  type: STRING
+  default: "0:0"
+  description: >-
+    Passed to docker --user, as UID:GID. run-simulation.sh defaults this to the
+    invoking user so the case directories are not left root-owned on the host.
+    Running with a uid that has no entry in the image's /etc/passwd leaves $USER
+    empty and makes `whoami` fail, which OpenFOAM tolerates for serial runs.
+
+environment:
+  name: OpenFOAMDocker
+  script:
+    let:
+    - mount_spec = string(Param.SessionsDir) + ':' + Param.ContainerMount
+
+    actions:
+      # onEnter and onExit belong to the wrapping environment itself, and a wrap
+      # environment's own lifecycle is never intercepted by its own hooks — so
+      # these two run on the HOST, not in the container. onEnter is a fail-fast
+      # check: without it, a missing image surfaces once per task as a confusing
+      # docker error instead of once, up front.
+      onEnter:
+        command: bash
+        args:
+        - -c
+        - >-
+          if docker image inspect {{ repr_sh(Param.Image) }} >/dev/null 2>&1;
+          then echo "wrap-env: image {{ Param.Image }} present, mounting {{ mount_spec }}";
+          else echo "wrap-env: image {{ Param.Image }} not found - build the sibling ubuntu-cpu sample first" >&2; exit 1;
+          fi
+
+      # Replaces the onEnter of every environment inside this one. In this
+      # sample that is the job's FoamCase environment, which clones the tutorial
+      # and runs blockMesh — so the mesh is generated in the container by this
+      # hook.
+      onWrapEnvEnter:
+        command: docker
+        args:
+        - run
+        - --rm
+        - --platform
+        - "{{ Param.Platform }}"
+        - --user
+        - "{{ Param.DockerUser }}"
+        # OpenFOAM's etc/bashrc derives WM_PROJECT_USER_DIR from $HOME. Docker
+        # sets HOME=/ for a uid with no passwd entry, which is not writable;
+        # pointing it at /tmp keeps anything that writes there happy.
+        - -e
+        - HOME=/tmp
+        - -v
+        - "{{ mount_spec }}"
+        - "{{ Param.Image }}"
+        # The image's ENTRYPOINT is `bash -lc`, which takes the whole command as
+        # ONE argument — hence a single composed string here rather than separate
+        # argv entries. That login shell is also what sources
+        # /etc/profile.d/openfoam.sh, so the solvers are on PATH.
+        #
+        # repr_sh() shell-quotes the forwarded command and args so
+        # metacharacters, spaces and quotes reach the process verbatim instead of
+        # being interpreted by that login shell — which matters here because the
+        # forwarded args are multi-line bash scripts. The `env` prefix applies
+        # any session-defined variables inside the container; with none defined
+        # the list is empty and `env` is a no-op passthrough.
+        - "env {{ repr_sh(WrappedAction.Environment) }} {{ repr_sh(WrappedAction.Command) }} {{ repr_sh(WrappedAction.Args) }}"
+
+      # Replaces the onRun of every task — this is the hook that solves.
+      onWrapTaskRun:
+        command: docker
+        args:
+        - run
+        - --rm
+        - --platform
+        - "{{ Param.Platform }}"
+        - --user
+        - "{{ Param.DockerUser }}"
+        - -e
+        - HOME=/tmp
+        - -v
+        - "{{ mount_spec }}"
+        - "{{ Param.Image }}"
+        - "env {{ repr_sh(WrappedAction.Environment) }} {{ repr_sh(WrappedAction.Command) }} {{ repr_sh(WrappedAction.Args) }}"
+
+      # Replaces the onExit of every environment inside this one — here the
+      # job environment's post-processing, which converts the solved cases to
+      # VTK and writes the summary.
+      onWrapEnvExit:
+        command: docker
+        args:
+        - run
+        - --rm
+        - --platform
+        - "{{ Param.Platform }}"
+        - --user
+        - "{{ Param.DockerUser }}"
+        - -e
+        - HOME=/tmp
+        - -v
+        - "{{ mount_spec }}"
+        - "{{ Param.Image }}"
+        - "env {{ repr_sh(WrappedAction.Environment) }} {{ repr_sh(WrappedAction.Command) }} {{ repr_sh(WrappedAction.Args) }}"
+
+      onExit:
+        command: bash
+        args:
+        - -c
+        # Quoted as a YAML string: an unquoted scalar containing ": " would be
+        # parsed as a mapping, not a command.
+        - 'echo "wrap-env: done"'
