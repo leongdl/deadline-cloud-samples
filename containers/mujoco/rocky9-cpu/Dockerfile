@@ -91,6 +91,11 @@ RUN printf 'mujoco=%s\ncube=%s\nmenagerie=%s\n' \
 COPY scripts/mj_hand_sweep.py /usr/local/bin/mj-hand-sweep
 RUN chmod 0755 /usr/local/bin/mj-hand-sweep
 
+# Menagerie's scene_right.xml holds an ellipsoid; this variant holds a sphere.
+# It goes in the shadow_hand directory because its <include> and that model's
+# meshdir="assets" both resolve relative to the main model file.
+COPY scenes/scene_right_ball.xml /models/mujoco_menagerie/shadow_hand/scene_right_ball.xml
+
 # egl is the only headless backend available on Rocky 9 (no OSMesa package).
 ENV MUJOCO_GL=egl
 ENV PYTHONUNBUFFERED=1

@@ -130,9 +130,17 @@ linked against a library shipped in a *separate* repo (`epel-cisco-openh264`). W
 "bit_rate, rate, width or height". The image installs it, and `mj-hand-sweep` falls back to `mpeg4`
 if it is ever absent, recording which codec it used in `metrics.json`.
 
-**Friction is not swept, deliberately.** Contact friction is the obvious third axis, and the scene
-does put a free-floating ellipsoid in the palm, so it would have an effect. It is left out to keep
-the sweep two-dimensional and its parameters independent of contact state.
+**The object in the palm is a sphere.** The default scene is `scene_right_ball.xml`, added by this
+sample: the Shadow Hand holding a checkered ball. Menagerie's stock `scene_right.xml` holds an
+ellipsoid instead — pass `-p Model=/models/mujoco_menagerie/shadow_hand/scene_right.xml` for that.
+The ball is a separate scene rather than a runtime `geom_type` change because body inertia is
+derived from the geom at compile time, so swapping the shape afterwards would leave the sphere with
+the ellipsoid's inertia. The checker texture matters more than it looks: a plain sphere appears
+static while spinning.
+
+**Friction is not swept, deliberately.** Contact friction is the obvious third axis, and the ball in
+the palm means it would have a real effect. It is left out to keep the sweep two-dimensional and its
+parameters independent of contact state.
 
 **Session directories.** Neither CLI exposes a session-directory flag; both derive the session root
 from the system temp dir on POSIX, so `run-sweep.sh` sets `TMPDIR` to `sessions/`. That whole

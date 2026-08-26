@@ -44,8 +44,10 @@ parameterDefinitions:
 
 - name: Model
   type: STRING
-  default: /models/mujoco_menagerie/shadow_hand/scene_right.xml
-  description: MJCF scene inside the image.
+  default: /models/mujoco_menagerie/shadow_hand/scene_right_ball.xml
+  description: >-
+    MJCF scene inside the image. The default is the right Shadow Hand holding a
+    sphere; scene_right.xml is Menagerie's stock scene with an ellipsoid.
 
 - name: OutputDir
   type: PATH

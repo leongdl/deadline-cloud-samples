@@ -53,6 +53,7 @@ Swap `cd /models/mujoco_menagerie/shadow_hand` and `scene_right.xml` to render t
 |---|---|
 | `/models/mujoco_cube` | `cube_3x3x3.xml`, sticker texture atlas, and the scripts that generate them |
 | `/models/mujoco_menagerie/shadow_hand` | `right_hand.xml`, `left_hand.xml`, `scene_right.xml`, `scene_left.xml`, `keyframes.xml`, meshes |
+| `…/shadow_hand/scene_right_ball.xml` | Added by this sample: the right hand holding a **sphere** rather than Menagerie's ellipsoid. Kept in that directory because its `<include>` and `meshdir="assets"` resolve relative to the main model file |
 | `/mujoco-refs.txt` | The MuJoCo version and the two model commits actually baked in |
 | `/usr/local/bin/mj-hand-sweep` | One Shadow Hand sweep point: apply parameters, simulate, render frames, encode an MP4. Driven by the job in [`../templates/`](../templates/) |
 
