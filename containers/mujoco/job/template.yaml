@@ -1,0 +1,164 @@
+specificationVersion: 'jobtemplate-2023-09'
+name: MuJoCo-HandSweep
+description: >
+  Sweeps two Shadow Hand physics parameters on a Deadline Cloud fleet. Each task
+  runs one combination inside the mujoco-rocky9 container and returns frames, an
+  MP4 and a GIF.
+
+parameterDefinitions:
+- name: ECR_REGISTRY
+  type: STRING
+  default: 224071664257.dkr.ecr.us-west-2.amazonaws.com
+  description: ECR registry holding the MuJoCo image.
+
+- name: MUJOCO_REPOSITORY
+  type: STRING
+  default: mujoco-rocky9
+  description: ECR repository name.
+
+- name: MUJOCO_TAG
+  type: STRING
+  default: latest
+  description: Image tag to run.
+
+- name: AWS_REGION
+  type: STRING
+  default: us-west-2
+
+- name: Duration
+  type: FLOAT
+  default: 2.0
+  minValue: 0.1
+  description: Simulated seconds per combination, which is also the clip length.
+
+- name: Fps
+  type: FLOAT
+  default: 20.0
+  minValue: 1.0
+  description: Rendered frames per simulated second. Rendering is software, so this is the cost knob.
+
+- name: VideoBitrate
+  type: STRING
+  default: 2M
+  description: Target MP4 bitrate. The image encodes H.264 with libopenh264, which is bitrate-driven.
+
+- name: Model
+  type: STRING
+  default: /models/mujoco_menagerie/shadow_hand/scene_right.xml
+  description: MJCF scene inside the image.
+
+- name: OutputDir
+  type: PATH
+  objectType: DIRECTORY
+  dataFlow: OUT
+  default: ./output
+  description: >
+    Directory the rendered frames, MP4 and GIF are written to. Declared as an
+    output so job attachments upload it and `deadline job download-output`
+    brings it back.
+
+steps:
+- name: Sweep
+  parameterSpace:
+    # Two task parameters, two values each. Deadline Cloud takes the cross
+    # product, so this is four tasks that the fleet can run in parallel.
+    taskParameterDefinitions:
+    - name: DampingScale
+      type: FLOAT
+      range:
+      - 0.5
+      - 4.0
+    - name: StiffnessScale
+      type: FLOAT
+      range:
+      - 0.5
+      - 2.0
+  script:
+    actions:
+      onRun:
+        command: bash
+        args: ['{{Task.File.Run}}']
+    embeddedFiles:
+    - name: Run
+      type: TEXT
+      data: |
+        #!/bin/bash
+        set -euo pipefail
+
+        LABEL="damp{{Task.Param.DampingScale}}-kp{{Task.Param.StiffnessScale}}"
+        IMAGE_URI="{{Param.ECR_REGISTRY}}/{{Param.MUJOCO_REPOSITORY}}:{{Param.MUJOCO_TAG}}"
+
+        echo "=============================================="
+        echo "MuJoCo Shadow Hand sweep point: $LABEL"
+        echo "=============================================="
+        echo "User:   $(whoami)"
+        echo "Dir:    $(pwd)"
+        echo "Host:   $(hostname)"
+        echo "Image:  $IMAGE_URI"
+        echo "Params: damping={{Task.Param.DampingScale}} stiffness={{Task.Param.StiffnessScale}}"
+        echo "        duration={{Param.Duration}}s fps={{Param.Fps}}"
+        echo ""
+
+        # --- ECR login ---
+        # The fleet's host configuration logs in as root, but this task runs as
+        # job-user and does not inherit root's docker credentials, so log in again.
+        echo "Logging in to ECR..."
+        aws ecr get-login-password --region {{Param.AWS_REGION}} \
+          | docker login --username AWS --password-stdin {{Param.ECR_REGISTRY}}
+
+        echo "Pulling $IMAGE_URI ..."
+        docker pull "$IMAGE_URI"
+
+        # --- Output staging ---
+        # docker writes into this directory as the invoking uid (see --user
+        # below), so job attachments can read it back afterwards.
+        OUT_DIR="{{Param.OutputDir}}/$LABEL"
+        mkdir -p "$OUT_DIR"
+        STAGE="$(cd "{{Param.OutputDir}}" && pwd)"
+        echo "Staging output under $STAGE"
+
+        # --- Run one sweep point ---
+        # The image ENTRYPOINT is `bash -lc`, so the whole command is one string.
+        # --user keeps the artifacts owned by job-user rather than root; without
+        # it the attachment upload cannot read them.
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -e HOME=/tmp \
+          -v "$STAGE:/out" \
+          "$IMAGE_URI" \
+          "mj-hand-sweep \
+             --model {{Param.Model}} \
+             --damping-scale {{Task.Param.DampingScale}} \
+             --stiffness-scale {{Task.Param.StiffnessScale}} \
+             --duration {{Param.Duration}} \
+             --fps {{Param.Fps}} \
+             --video-bitrate {{Param.VideoBitrate}} \
+             --gif \
+             --out-dir /out/$LABEL \
+             --label $LABEL"
+
+        # --- Verify artifacts, do not trust the exit code alone ---
+        echo ""
+        echo "--- Artifacts for $LABEL ---"
+        ls -la "$OUT_DIR"
+        FRAMES=$(find "$OUT_DIR/frames" -name '*.png' 2>/dev/null | wc -l)
+        echo "frames:      $FRAMES"
+        for f in clip.mp4 preview.gif metrics.json; do
+          if [ -s "$OUT_DIR/$f" ]; then
+            echo "$f: $(stat --printf='%s' "$OUT_DIR/$f") bytes"
+          else
+            echo "ERROR: $OUT_DIR/$f missing or empty"
+            exit 1
+          fi
+        done
+        if [ "$FRAMES" -eq 0 ]; then
+          echo "ERROR: no frames rendered"
+          exit 1
+        fi
+
+        echo ""
+        echo "--- metrics.json ---"
+        cat "$OUT_DIR/metrics.json"
+
+        echo ""
+        echo "Sweep point $LABEL complete."
