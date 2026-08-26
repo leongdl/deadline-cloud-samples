@@ -1,0 +1,134 @@
+# MuJoCo Shadow Hand parameter sweep — Open Job Description 2023-09, EXPR extension.
+#
+# Nothing in this template mentions docker. The command below is written as if it
+# already runs inside the mujoco-rocky9 container, and the WRAP_ACTIONS
+# environment in local-docker-wrap-env.yaml is what actually puts it there: it
+# intercepts the task's onRun and re-executes it via `docker run`, forwarding
+# command and args verbatim with EXPR's repr_sh().
+#
+# The sweep itself is the step's parameter space. Two task parameters with two
+# values each give the cross product — four tasks, one simulation per
+# combination, each rendering its own frames. Scaling the sweep is editing a
+# range, not editing a loop.
+#
+# Run it with run-sweep.sh, which supplies the parameters below and applies the
+# wrap environment. Manual equivalent:
+#
+#   openjd run mujoco-hand-sweep-job.yaml \
+#       --environment local-docker-wrap-env.yaml \
+#       -p SessionsDir=<abs path to ./sessions> \
+#       -p ContainerMount=/mnt/session \
+#       -p RunPrefix=rust
+#
+specificationVersion: jobtemplate-2023-09
+
+# EXPR provides the `let` bindings used below. WRAP_ACTIONS is declared by the
+# environment template, not here — this job is deliberately unaware of it.
+extensions:
+- EXPR
+
+name: MuJoCoHandSweep
+description: Sweeps two Shadow Hand physics parameters, simulating and rendering each combination in a container via WRAP_ACTIONS.
+
+parameterDefinitions:
+# ContainerMount is declared in BOTH this template and local-docker-wrap-env.yaml,
+# with the same type and default. That is legal: the CLI merges job and
+# environment template parameter definitions into one parameter space, and
+# definitions of the same name must agree on type (the last default wins). One
+# `-p ContainerMount=...` therefore moves the bind-mount target and the paths
+# below together, so the two templates cannot drift apart.
+- name: ContainerMount
+  type: STRING
+  default: /mnt/session
+  description: Where the host session directory is mounted inside the container.
+
+# In-container paths are STRING, not PATH, on purpose. PATH parameters are
+# resolved and validated against the *host* filesystem (and are subject to path
+# mapping), which would rewrite or reject a container-only path.
+- name: OutputSubdir
+  type: STRING
+  default: output
+  description: Where per-combination frames and metrics are written, relative to ContainerMount.
+
+- name: Model
+  type: STRING
+  default: /models/mujoco_menagerie/shadow_hand/scene_right.xml
+  description: MJCF scene inside the image. The default is Menagerie's right Shadow Hand.
+
+- name: Duration
+  type: FLOAT
+  default: 5.0
+  minValue: 0.1
+  description: >-
+    Simulated seconds per combination. The model's timestep is 2 ms, so the
+    default is 2500 steps.
+
+- name: Fps
+  type: FLOAT
+  default: 20.0
+  minValue: 1.0
+  description: >-
+    Rendered frames per simulated second. Rendering is software (llvmpipe), so
+    this is the main cost knob: the default gives 100 frames per combination.
+
+- name: RunPrefix
+  type: STRING
+  default: run
+  description: Output subdirectory name, so two implementations do not overwrite each other.
+
+steps:
+- name: Sweep
+  parameterSpace:
+    # Two parameters, two values each. OpenJD takes the cross product of task
+    # parameters by default, so this is a 2x2 sweep = 4 tasks.
+    #
+    # Both are applied to the compiled mjModel, not by rewriting the MJCF —
+    # name-matching XML edits silently hit nothing on this model, because the
+    # compiled Shadow Hand has exactly one named geom and its per-class joint
+    # damping lives in <default> blocks. mj-hand-sweep counts what each
+    # mutation touched and fails if the count is zero.
+    taskParameterDefinitions:
+    # Multiplier on hinge-joint damping, applied to the hand's 24 finger and
+    # wrist DOFs and not to the free-floating object's 6. Low is loose and
+    # oscillatory, high is sluggish.
+    - name: DampingScale
+      type: FLOAT
+      range:
+      - 0.5
+      - 4.0
+    # Multiplier on the position actuators' kp, across all 20 of them. Low
+    # underdrives the fingers so they never reach the commanded pose, high
+    # drives them hard into it.
+    - name: StiffnessScale
+      type: FLOAT
+      range:
+      - 0.5
+      - 2.0
+  script:
+    # EXPR let bindings. These live at script level rather than step level
+    # because they reference Task.Param.*, which step-level `let` cannot see.
+    # Binding names must be lowercase per the EXPR spec.
+    let:
+    - label = 'damp' + string(Task.Param.DampingScale) + '-kp' + string(Task.Param.StiffnessScale)
+    - out_dir = Param.ContainerMount + '/' + Param.OutputSubdir + '/' + Param.RunPrefix + '/' + label
+    actions:
+      onRun:
+        # This is the in-container invocation. The wrap hook receives it as
+        # WrappedAction.Command / WrappedAction.Args and forwards it verbatim.
+        # mj-hand-sweep is baked into the image by ../rocky9-cpu/Dockerfile.
+        command: mj-hand-sweep
+        args:
+        - --model
+        - "{{ Param.Model }}"
+        - --damping-scale
+        - "{{ Task.Param.DampingScale }}"
+        - --stiffness-scale
+        - "{{ Task.Param.StiffnessScale }}"
+        - --duration
+        - "{{ Param.Duration }}"
+        - --fps
+        - "{{ Param.Fps }}"
+        - --out-dir
+        - "{{ out_dir }}"
+        - --label
+        - "{{ label }}"

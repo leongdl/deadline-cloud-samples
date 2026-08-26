@@ -1,0 +1,3 @@
+# The session root: session working directories, rendered frames, metrics and
+# run logs. All generated, none of it belongs in git.
+sessions/

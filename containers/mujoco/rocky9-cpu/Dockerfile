@@ -41,7 +41,11 @@ RUN python3.12 -m pip install --no-cache-dir \
         "mujoco==${MUJOCO_VERSION}" \
         "numpy" \
         "pillow" \
-    && ln -sf /usr/bin/python3.12 /usr/local/bin/python
+    # Rocky's own /usr/bin/python3 is 3.9, which has no mujoco. /usr/local/bin
+    # precedes /usr/bin on PATH, so these symlinks make plain `python3` (and any
+    # `#!/usr/bin/env python3` shebang) resolve to the interpreter that does.
+    && ln -sf /usr/bin/python3.12 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.12 /usr/local/bin/python3
 
 # --- models -----------------------------------------------------------------
 # Pinned commits rather than branch tips, so the scene geometry cannot shift
@@ -68,6 +72,11 @@ RUN git clone --quiet --filter=blob:none --sparse \
 RUN printf 'mujoco=%s\ncube=%s\nmenagerie=%s\n' \
         "$(python3.12 -c 'import mujoco; print(mujoco.__version__)')" \
         "${CUBE_REF}" "${MENAGERIE_REF}" > /mujoco-refs.txt
+
+# One sweep point: apply parameters to the compiled model, simulate, render
+# frames. See templates/ for the job that sweeps it.
+COPY scripts/mj_hand_sweep.py /usr/local/bin/mj-hand-sweep
+RUN chmod 0755 /usr/local/bin/mj-hand-sweep
 
 # egl is the only headless backend available on Rocky 9 (no OSMesa package).
 ENV MUJOCO_GL=egl
