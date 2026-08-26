@@ -50,8 +50,8 @@ supplied by the farm, which is the same mechanism applied at a different scope.
 
 3. **Queue role permissions.** The task calls `aws ecr get-login-password` with the *queue role*, so
    that role needs ECR read and CloudWatch log-stream writes. See
-   [Queue role permissions](#queue-role-permissions) below — this is the step most likely to be
-   missing.
+   the [troubleshooting appendix](#appendix-troubleshooting) below — this is the step most likely to
+   be missing.
 
 ## Submit
 
@@ -109,50 +109,29 @@ Artifacts downloaded and checked — every GIF parsed for real frame blocks, not
 The session log confirms the container path end to end: `Running Session Actions as user: job-user`,
 `Login Succeeded`, then `Pulling .../mujoco-rocky9:latest`.
 
-## Queue role permissions
+## Appendix: troubleshooting
 
-The step script runs as the queue's role, so that role needs more than the default. Both gaps below
-produced failures that pointed somewhere unhelpful, so they are worth checking before submitting.
+Everything below was hit while getting this job to run. Each row is problem, fix, and the command
+that identifies it — the diagnostic matters most, because several of these report something
+misleading.
 
-**ECR read.** Without it, `aws ecr get-login-password` fails and every task dies at the pull. Scope
-it to the one repository rather than attaching `AmazonEC2ContainerRegistryFullAccess`:
+| Problem | Fix | How to find it |
+|---|---|---|
+| Session fails instantly, `processExitCode: 0`, `Log provisioning error: ResourceNotFoundException`. Nothing reaches the log. | Create the log group `/aws/deadline/<farm-id>/<queue-id>`. | `aws logs describe-log-groups --log-group-name-prefix /aws/deadline/<farm-id>/<queue-id>` returns `[]`. |
+| `Value at 'logStreamName' failed to satisfy constraint: Member must not be null` | Same root cause as the row above — not a separate bug. Fix the log group and the role, and this goes away. | Check for the log-provisioning failure first, on the `syncInputJobAttachments` action. |
+| Sessions fail before running anything, log group *does* exist. | Add `logs:CreateLogStream`, `logs:PutLogEvents`, `logs:DescribeLogStreams` to the queue role, on `arn:aws:logs:<region>:<account>:log-group:/aws/deadline/<farm-id>/*` and its `:log-stream:*`. | Dump the queue role's policies and grep for `logs:`. Only `logs:GetLogEvents` means writes are missing. |
+| Every task dies at `docker pull`. | Give the queue role ECR read: `ecr:GetAuthorizationToken` on `*`, plus `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchCheckLayerAvailability` on the one repository. | Grep the queue role's policies for `ecr:`. The task calls `aws ecr get-login-password` as the *queue* role, not the fleet role. |
+| Workers reach `CREATED` and never `STARTED`. `Could not sts:AssumeRole ... allows sts:AssumeRole by credentials.deadline.amazonaws.com` | Fix the fleet role's trust policy, or point the fleet at the standard `AWSDeadlineCloudFleetRole-*`. | `aws deadline get-fleet` for `roleArn`, then check that role's trust policy. Job-side debugging is a dead end here. |
+| Tasks sit `READY` forever, no sessions ever appear. | Associate the fleet with the queue. | `aws deadline list-queue-fleet-associations --farm-id <f> --queue-id <q>` is empty. |
+| `docker: command not found`, or permission denied on the docker socket. | Fleet host configuration needs `dnf install docker -y`, `systemctl start docker`, `usermod -aG docker job-user`. | `aws deadline get-fleet --query hostConfiguration.scriptBody`. Note a trailing `exit 0` with no `set -e` makes the script report success even when docker never installed. |
+| Job succeeds but no output downloads. | The container must not write as root: `docker run --user "$(id -u):$(id -g)"`. | `ls -la` the output dir in the session log. Root-owned files cannot be read by the attachment upload. |
+| `docker pull` fails only inside the task, though the host config logged in fine. | Log in again inside the step script. | Host config runs as root and writes `/root/.docker/config.json`; the task runs as `job-user` and does not inherit it. |
 
-```json
-{ "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
-{ "Effect": "Allow",
-  "Action": ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage",
-             "ecr:GetDownloadUrlForLayer", "ecr:DescribeImages"],
-  "Resource": "arn:aws:ecr:<region>:<account>:repository/mujoco-rocky9" }
-```
+### Triage order
 
-**CloudWatch log-stream writes.** Without these the session fails *before running anything*, with
-`Log provisioning error: ResourceNotFoundException` on the `syncInputJobAttachments` action and
-`processExitCode: 0`. Nothing reaches the log, because the log is what failed:
-
-```json
-{ "Effect": "Allow",
-  "Action": ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"],
-  "Resource": ["arn:aws:logs:<region>:<account>:log-group:/aws/deadline/<farm-id>/*",
-               "arn:aws:logs:<region>:<account>:log-group:/aws/deadline/<farm-id>/*:log-stream:*"] }
-```
-
-The session's log group, `/aws/deadline/<farm-id>/<queue-id>`, must also exist. Deadline Cloud
-normally creates it with the queue; if it is missing, create it explicitly, because
-`CreateLogStream` against an absent group is what raises that `ResourceNotFoundException`.
-
-A follow-on symptom is worth recognising: once provisioning fails, later calls pass no stream name
-and you get `Value at 'logStreamName' failed to satisfy constraint: Member must not be null`. That
-is the same root cause, not a second problem.
-
-## Other failure modes seen
-
-**Fleet role trust policy.** Workers that reach `CREATED` and never become `STARTED`, with
-`Could not sts:AssumeRole ... Please check its trust policy to verify that it allows sts:AssumeRole
-by credentials.deadline.amazonaws.com`, are a fleet-role problem, not a job problem. Check the
-fleet's `roleArn` trust policy.
-
-**No queue-fleet association.** Tasks sit `READY` forever with no sessions. Check
-`aws deadline list-queue-fleet-associations`.
-
-**Root-owned output.** The step passes `docker run --user "$(id -u):$(id -g)"`. Without it the
-container writes as root and the attachment upload cannot read the files back.
+1. `aws deadline get-job` — is it `READY` (nothing picked it up) or are tasks `FAILED`?
+2. `aws deadline list-sessions` — no sessions means scheduling or fleet, not your script.
+3. `aws deadline list-session-actions` — which action failed, and was it the job's or the queue's?
+4. `aws deadline get-session-action` — `progressMessage` carries the real reason. `processExitCode: 0`
+   on a failed action means the session never got as far as your code.
+5. Only then read the session log in CloudWatch.
