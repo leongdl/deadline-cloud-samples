@@ -4,9 +4,9 @@ Submits the Shadow Hand parameter sweep to a Deadline Cloud queue. Each task run
 combination inside the [`rocky9-cpu`](../rocky9-cpu/) image on a fleet worker, and job attachments
 bring the frames, MP4 and GIF back to your machine.
 
-This is the farm counterpart of [`../templates/`](../templates/), which runs the same sweep locally
-through the `openjd` CLI. The simulation and the 2x2 parameter space are identical; only the
-delivery differs.
+This is the farm counterpart of [`../templates/`](../templates/), which runs the same simulation
+locally through the `openjd` CLI. The local sample sweeps two parameters (4 tasks) to stay quick;
+this one sweeps three (24 tasks), because a farm is where a wider sweep belongs.
 
 | | `../templates/` (local) | `job/` (farm) |
 |---|---|---|
@@ -73,11 +73,11 @@ Overrides: `DOCKER_REPO`, `DOCKER_TAG`, `ECR_REGISTRY`, `DURATION`, `FPS`, `MAX_
 ## Output
 
 `deadline job download-output` writes into `./output/`, one directory per combination — 43 files
-each, 172 in total for the 2x2:
+each, 1032 in total for the 24-task sweep:
 
 ```text
-output/damp4.0-kp2.0/
-├── frames/damp4.0-kp2.0-0000.png   ... 0039.png
+output/damp4.0-kp2.0-fr4.0/
+├── frames/damp4.0-kp2.0-fr4.0-0000.png   ... 0039.png
 ├── clip.mp4
 ├── preview.gif
 └── metrics.json
@@ -86,25 +86,43 @@ output/damp4.0-kp2.0/
 `OutputDir` is a `PATH` parameter with `objectType: DIRECTORY` and `dataFlow: OUT`, which is what
 makes job attachments upload it from the worker and reassemble it locally.
 
+## What is swept
+
+Three task parameters, cross-multiplied by Deadline Cloud into 24 tasks:
+
+| Task parameter | Values | Effect |
+|---|---|---|
+| `DampingScale` | 0.25, 0.5, 2.0, 4.0 | Hinge-joint damping across the hand's 24 finger and wrist DOFs |
+| `StiffnessScale` | 0.5, 1.0, 2.0 | Position-actuator `kp` across all 20 actuators |
+| `FrictionScale` | 0.25, 4.0 | Friction on the ball in the palm, all three components |
+
+Widening the sweep is editing a `range` — one more damping value adds six tasks.
+
 ## Verified run
 
-Submitted to a service-managed Linux spot fleet (8–32 vCPU, max 3 workers), 4 tasks across 3
-workers, 2 simulated seconds per combination at 20 fps:
+Submitted to a service-managed Linux spot fleet (8-32 vCPU, max 3 workers), 24 tasks, 2 simulated
+seconds per combination at 20 fps:
 
 ```
 lifecycleStatus  CREATE_COMPLETE
 taskRunStatus    SUCCEEDED
-tasks            READY 0 / RUNNING 0 / SUCCEEDED 4 / FAILED 0
+tasks            READY 0 / RUNNING 0 / SUCCEEDED 24 / FAILED 0
 ```
 
-Artifacts downloaded and checked — every GIF parsed for real frame blocks, not just a size check:
+Wall clock was about 7 minutes including the fleet scaling from zero; 545 s of task compute, mean
+22.7 s each, across 3 workers. All 1032 files downloaded and checked: every combination has 40
+frames, a non-empty H.264 MP4, and a GIF parsed for real frame blocks rather than just a size check.
 
-| Combination | Frames | MP4 bytes | GIF bytes | GIF images | Codec | Clip |
-|---|---|---|---|---|---|---|
-| `damp0.5-kp0.5` | 40 | 284,166 | 2,099,189 | 40 | libopenh264 | 2.0 s |
-| `damp0.5-kp2.0` | 40 | 287,707 | 2,106,838 | 40 | libopenh264 | 2.0 s |
-| `damp4.0-kp0.5` | 40 | 254,114 | 2,112,301 | 40 | libopenh264 | 2.0 s |
-| `damp4.0-kp2.0` | 40 | 275,636 | 2,074,207 | 40 | libopenh264 | 2.0 s |
+The friction axis dominates the outcome, which is the point of sweeping it:
+
+| Friction | Combinations | Mean ball displacement | Mean lowest height |
+|---|---|---|---|
+| x0.25 | 12 | 0.3165 m | -0.0778 m |
+| x4.0 | 12 | 0.0484 m | +0.0451 m |
+
+At x4.0 the hand keeps the ball — it stays above the palm. At x0.25 the ball squirts out of the
+fingers and ends up on the floor at z = -0.1. Same damping and stiffness, 6.5x the displacement.
+Stiffness moves peak actuator force monotonically (1.022 -> 1.089 -> 1.207 for kp x0.5 -> x1.0 -> x2.0).
 
 The session log confirms the container path end to end: `Running Session Actions as user: job-user`,
 `Login Succeeded`, then `Pulling .../mujoco-rocky9:latest`.

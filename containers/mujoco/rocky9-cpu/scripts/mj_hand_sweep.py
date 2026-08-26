@@ -57,7 +57,7 @@ def hand_camera(model, data, azimuth, elevation, zoom):
     return camera
 
 
-def build_model(model_path, damping_scale, stiffness_scale):
+def build_model(model_path, damping_scale, stiffness_scale, friction_scale):
     """Compile the model and apply the sweep parameters to it.
 
     Returns (model, applied) where `applied` records what each mutation changed,
@@ -104,6 +104,21 @@ def build_model(model_path, damping_scale, stiffness_scale):
         model.actuator_biasprm[a, 1] *= stiffness_scale
     kp_after = float(np.mean(model.actuator_gainprm[position_acts, 0]))
 
+    # Friction on the manipulated object. Only meaningful because the scene puts
+    # a free-floating body in the palm; scale all three components (sliding,
+    # torsional, rolling) so their ratio is preserved. The object carries
+    # priority="1", so its friction wins over the hand's in every contact pair --
+    # scaling it here is what actually changes grip.
+    body_names = [mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i) for i in range(model.nbody)]
+    object_bodies = {i for i, n in enumerate(body_names) if n == "object"}
+    object_geoms = [g for g in range(model.ngeom) if model.geom_bodyid[g] in object_bodies]
+    if not object_geoms:
+        sys.exit("no geoms on a body named 'object': scene has nothing to grip?")
+
+    friction_before = float(np.mean(model.geom_friction[object_geoms, 0]))
+    model.geom_friction[object_geoms] *= friction_scale
+    friction_after = float(np.mean(model.geom_friction[object_geoms, 0]))
+
     applied = {
         "hinge_dofs_scaled": len(hinge_dofs),
         "mean_damping_before": damping_before,
@@ -111,6 +126,9 @@ def build_model(model_path, damping_scale, stiffness_scale):
         "position_actuators_scaled": len(position_acts),
         "mean_kp_before": kp_before,
         "mean_kp_after": kp_after,
+        "object_geoms_scaled": len(object_geoms),
+        "mean_slide_friction_before": friction_before,
+        "mean_slide_friction_after": friction_after,
     }
     return model, applied
 
@@ -171,6 +189,8 @@ def main():
                    help="Multiplier on hinge-joint damping.")
     p.add_argument("--stiffness-scale", type=float, default=1.0,
                    help="Multiplier on position-actuator kp.")
+    p.add_argument("--friction-scale", type=float, default=1.0,
+                   help="Multiplier on the manipulated object's friction (slide, torsion, roll).")
     p.add_argument("--duration", type=float, default=2.0,
                    help="Simulated seconds, which is also the clip length.")
     p.add_argument("--cycle", type=float, default=2.0,
@@ -195,7 +215,8 @@ def main():
                    help="Also write preview.gif. Off by default; the MP4 supersedes it.")
     args = p.parse_args()
 
-    model, applied = build_model(args.model, args.damping_scale, args.stiffness_scale)
+    model, applied = build_model(args.model, args.damping_scale, args.stiffness_scale,
+                                 args.friction_scale)
     data = mujoco.MjData(model)
 
     steps = int(round(args.duration / model.opt.timestep))
@@ -207,6 +228,13 @@ def main():
 
     mujoco.mj_forward(model, data)
     camera = hand_camera(model, data, args.azimuth, args.elevation, args.zoom)
+
+    # Track the manipulated object so the friction axis is measurable: a low
+    # friction ball squirts out of the fingers, which shows up as displacement
+    # and a drop in height rather than in the force numbers.
+    object_bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "object")
+    object_start = np.array(data.xpos[object_bid]) if object_bid >= 0 else None
+    object_min_z = float("inf")
 
     renderer = mujoco.Renderer(model, args.height, args.width)
     frames = []
@@ -224,6 +252,8 @@ def main():
 
         peak_flexion = max(peak_flexion, float(np.abs(data.qpos[: model.nu]).max()))
         peak_actuator_force = max(peak_actuator_force, float(np.abs(data.actuator_force).max()))
+        if object_bid >= 0:
+            object_min_z = min(object_min_z, float(data.xpos[object_bid][2]))
 
         if step % frame_every == 0:
             renderer.update_scene(data, camera)
@@ -256,6 +286,7 @@ def main():
         "params": {
             "damping_scale": args.damping_scale,
             "stiffness_scale": args.stiffness_scale,
+            "friction_scale": args.friction_scale,
             "duration_s": args.duration,
             "cycle_s": args.cycle,
             "fps": args.fps,
@@ -275,6 +306,14 @@ def main():
         "mp4_codec": mp4_codec,
         "peak_flexion_rad": peak_flexion,
         "peak_actuator_force": peak_actuator_force,
+        "object_displacement_m": (
+            round(float(np.linalg.norm(np.array(data.xpos[object_bid]) - object_start)), 5)
+            if object_start is not None else None
+        ),
+        "object_min_z_m": round(object_min_z, 5) if object_min_z != float("inf") else None,
+        "object_final_z_m": (
+            round(float(data.xpos[object_bid][2]), 5) if object_bid >= 0 else None
+        ),
         "wall_seconds": round(wall_seconds, 2),
         "mujoco": mujoco.__version__,
     }
@@ -286,6 +325,8 @@ def main():
         f"{applied['mean_damping_after']:.4f} over {applied['hinge_dofs_scaled']} dofs), "
         f"kp x{args.stiffness_scale} ({applied['mean_kp_before']:.2f} -> "
         f"{applied['mean_kp_after']:.2f} over {applied['position_actuators_scaled']} actuators), "
+        f"friction x{args.friction_scale} ({applied['mean_slide_friction_before']:.3f} -> "
+        f"{applied['mean_slide_friction_after']:.3f} over {applied['object_geoms_scaled']} geoms), "
         f"peak_flexion {peak_flexion:.3f} rad, peak_force {peak_actuator_force:.3f}, "
         f"mp4 {mp4_bytes if mp4_bytes is not None else 'skipped'} bytes "
         f"({mp4_codec or 'none'}), "

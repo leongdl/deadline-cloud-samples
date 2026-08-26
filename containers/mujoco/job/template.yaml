@@ -62,19 +62,34 @@ parameterDefinitions:
 steps:
 - name: Sweep
   parameterSpace:
-    # Two task parameters, two values each. Deadline Cloud takes the cross
-    # product, so this is four tasks that the fleet can run in parallel.
+    # Three task parameters. Deadline Cloud takes the cross product, so
+    # 4 x 3 x 2 = 24 tasks, which the fleet runs in parallel. Widening a sweep
+    # is editing a range, not editing a loop -- adding one damping value here
+    # adds six tasks.
     taskParameterDefinitions:
+    # Hinge-joint damping across the hand's 24 finger and wrist DOFs.
     - name: DampingScale
       type: FLOAT
       range:
+      - 0.25
       - 0.5
+      - 2.0
       - 4.0
+    # Position-actuator kp across all 20 actuators.
     - name: StiffnessScale
       type: FLOAT
       range:
       - 0.5
+      - 1.0
       - 2.0
+    # Friction on the ball in the palm. Only meaningful because the scene has a
+    # free-floating object; the ball carries priority="1", so its friction wins
+    # in every contact pair with the hand.
+    - name: FrictionScale
+      type: FLOAT
+      range:
+      - 0.25
+      - 4.0
   script:
     actions:
       onRun:
@@ -87,7 +102,7 @@ steps:
         #!/bin/bash
         set -euo pipefail
 
-        LABEL="damp{{Task.Param.DampingScale}}-kp{{Task.Param.StiffnessScale}}"
+        LABEL="damp{{Task.Param.DampingScale}}-kp{{Task.Param.StiffnessScale}}-fr{{Task.Param.FrictionScale}}"
         IMAGE_URI="{{Param.ECR_REGISTRY}}/{{Param.MUJOCO_REPOSITORY}}:{{Param.MUJOCO_TAG}}"
 
         echo "=============================================="
@@ -97,7 +112,7 @@ steps:
         echo "Dir:    $(pwd)"
         echo "Host:   $(hostname)"
         echo "Image:  $IMAGE_URI"
-        echo "Params: damping={{Task.Param.DampingScale}} stiffness={{Task.Param.StiffnessScale}}"
+        echo "Params: damping={{Task.Param.DampingScale}} stiffness={{Task.Param.StiffnessScale}} friction={{Task.Param.FrictionScale}}"
         echo "        duration={{Param.Duration}}s fps={{Param.Fps}}"
         echo ""
 
@@ -132,6 +147,7 @@ steps:
              --model {{Param.Model}} \
              --damping-scale {{Task.Param.DampingScale}} \
              --stiffness-scale {{Task.Param.StiffnessScale}} \
+             --friction-scale {{Task.Param.FrictionScale}} \
              --duration {{Param.Duration}} \
              --fps {{Param.Fps}} \
              --video-bitrate {{Param.VideoBitrate}} \
