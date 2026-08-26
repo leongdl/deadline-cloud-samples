@@ -16,6 +16,8 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import time
 
@@ -113,6 +115,43 @@ def build_model(model_path, damping_scale, stiffness_scale):
     return model, applied
 
 
+def encode_mp4(frames_dir, label, out_path, fps, bitrate):
+    """Encode the rendered PNG sequence to an MP4, keeping the frames in place.
+
+    Returns (size_bytes, codec, error). H.264 via libopenh264 is tried first for
+    playback compatibility; EPEL's ffmpeg-free has no libx264, and its
+    libopenh264 needs a library from a separate repo, so mpeg4 is the fallback
+    when that is absent. yuv420p is explicit because players reject the formats
+    these encoders otherwise pick.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return None, None, "ffmpeg not found on PATH"
+
+    attempts = (
+        ("libopenh264", ["-c:v", "libopenh264", "-b:v", bitrate]),
+        ("mpeg4", ["-c:v", "mpeg4", "-q:v", "3"]),
+    )
+
+    last = "no encoder attempted"
+    for codec, codec_args in attempts:
+        cmd = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-framerate", str(fps),
+            "-i", str(frames_dir / f"{label}-%04d.png"),
+            *codec_args,
+            "-pix_fmt", "yuv420p",
+            str(out_path),
+        ]
+        done = subprocess.run(cmd, capture_output=True, text=True)
+        if done.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            return out_path.stat().st_size, codec, None
+        tail = (done.stderr or "").strip().splitlines()[-1:]
+        last = f"{codec} failed ({done.returncode}): {' '.join(tail)[:120]}"
+
+    return None, None, last
+
+
 def grasp_targets(model, phase):
     """Control targets for an open/close cycle, as a fraction `phase` of full flexion.
 
@@ -132,8 +171,8 @@ def main():
                    help="Multiplier on hinge-joint damping.")
     p.add_argument("--stiffness-scale", type=float, default=1.0,
                    help="Multiplier on position-actuator kp.")
-    p.add_argument("--duration", type=float, default=5.0,
-                   help="Simulated seconds.")
+    p.add_argument("--duration", type=float, default=2.0,
+                   help="Simulated seconds, which is also the clip length.")
     p.add_argument("--cycle", type=float, default=2.0,
                    help="Seconds per open/close cycle.")
     p.add_argument("--fps", type=float, default=20.0,
@@ -148,6 +187,12 @@ def main():
     p.add_argument("--elevation", type=float, default=DEFAULT_ELEVATION)
     p.add_argument("--zoom", type=float, default=1.15,
                    help="Camera distance as a multiple of the hand's bounding diagonal.")
+    p.add_argument("--no-video", dest="video", action="store_false",
+                   help="Skip MP4 encoding and keep only the PNG frames.")
+    p.add_argument("--video-bitrate", default="2M",
+                   help="Target bitrate for the MP4 (libopenh264 is bitrate-driven).")
+    p.add_argument("--gif", action="store_true",
+                   help="Also write preview.gif. Off by default; the MP4 supersedes it.")
     args = p.parse_args()
 
     model, applied = build_model(args.model, args.damping_scale, args.stiffness_scale)
@@ -191,9 +236,20 @@ def main():
 
     wall_seconds = time.time() - wall_start
 
-    if frames:
+    if frames and args.gif:
         frames[0].save(out_dir / "preview.gif", format="GIF", save_all=True,
                        append_images=frames[1:], duration=int(1000 / args.fps), loop=0)
+
+    # The frames stay on disk either way; the MP4 is an addition, not a
+    # replacement. Encoding is a hard failure when asked for, so a sweep cannot
+    # report success while quietly producing no clips.
+    mp4_bytes = None
+    mp4_codec = None
+    if frames and args.video:
+        mp4_bytes, mp4_codec, err = encode_mp4(frames_dir, args.label, out_dir / "clip.mp4",
+                                               args.fps, args.video_bitrate)
+        if err:
+            sys.exit(f"MP4 encode failed: {err}")
 
     metrics = {
         "label": args.label,
@@ -214,6 +270,9 @@ def main():
         "applied": applied,
         "steps": steps,
         "frames": len(frames),
+        "clip_seconds": round(len(frames) / args.fps, 3) if frames else 0,
+        "mp4_bytes": mp4_bytes,
+        "mp4_codec": mp4_codec,
         "peak_flexion_rad": peak_flexion,
         "peak_actuator_force": peak_actuator_force,
         "wall_seconds": round(wall_seconds, 2),
@@ -228,6 +287,8 @@ def main():
         f"kp x{args.stiffness_scale} ({applied['mean_kp_before']:.2f} -> "
         f"{applied['mean_kp_after']:.2f} over {applied['position_actuators_scaled']} actuators), "
         f"peak_flexion {peak_flexion:.3f} rad, peak_force {peak_actuator_force:.3f}, "
+        f"mp4 {mp4_bytes if mp4_bytes is not None else 'skipped'} bytes "
+        f"({mp4_codec or 'none'}), "
         f"{wall_seconds:.1f}s wall"
     )
 

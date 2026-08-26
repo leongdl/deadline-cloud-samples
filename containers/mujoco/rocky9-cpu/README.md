@@ -14,9 +14,13 @@ manylinux wheels, so this is a `pip install` and the image builds in about a min
 docker build --platform linux/amd64 -t mujoco-rocky9 .
 ```
 
-Roughly 1 minute, producing a 700 MB image. The build renders a frame of the real cube model and
+Roughly 1 minute, producing a 972 MB image. The build renders a frame of the real cube model and
 fails if the pixels come back empty, so a broken GL stack surfaces at build time rather than in
 your first run.
+
+ffmpeg is included, for turning rendered frames into video. Rocky 9 ships none, so it comes from
+EPEL as `ffmpeg-free` — which has no libx264, and needs the `openh264` package from the separate
+`epel-cisco-openh264` repo before `-c:v libopenh264` will initialise. Both are installed.
 
 ## Run
 
@@ -50,6 +54,7 @@ Swap `cd /models/mujoco_menagerie/shadow_hand` and `scene_right.xml` to render t
 | `/models/mujoco_cube` | `cube_3x3x3.xml`, sticker texture atlas, and the scripts that generate them |
 | `/models/mujoco_menagerie/shadow_hand` | `right_hand.xml`, `left_hand.xml`, `scene_right.xml`, `scene_left.xml`, `keyframes.xml`, meshes |
 | `/mujoco-refs.txt` | The MuJoCo version and the two model commits actually baked in |
+| `/usr/local/bin/mj-hand-sweep` | One Shadow Hand sweep point: apply parameters, simulate, render frames, encode an MP4. Driven by the job in [`../templates/`](../templates/) |
 
 Both model repos are pinned to commits, not branch tips, so the geometry cannot shift under a
 rebuild. Override with `--build-arg CUBE_REF=…`, `--build-arg MENAGERIE_REF=…`, or

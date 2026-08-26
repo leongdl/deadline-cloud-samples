@@ -57,11 +57,11 @@ parameterDefinitions:
 
 - name: Duration
   type: FLOAT
-  default: 5.0
+  default: 2.0
   minValue: 0.1
   description: >-
-    Simulated seconds per combination. The model's timestep is 2 ms, so the
-    default is 2500 steps.
+    Simulated seconds per combination, which is also the MP4 clip length. The
+    model's timestep is 2 ms, so the default is 1000 steps.
 
 - name: Fps
   type: FLOAT
@@ -70,6 +70,13 @@ parameterDefinitions:
   description: >-
     Rendered frames per simulated second. Rendering is software (llvmpipe), so
     this is the main cost knob: the default gives 100 frames per combination.
+
+- name: VideoBitrate
+  type: STRING
+  default: 2M
+  description: >-
+    Target bitrate for the MP4. EPEL's ffmpeg-free carries no libx264, so the
+    encoder is libopenh264, which is bitrate-driven rather than CRF-driven.
 
 - name: RunPrefix
   type: STRING
@@ -128,6 +135,8 @@ steps:
         - "{{ Param.Duration }}"
         - --fps
         - "{{ Param.Fps }}"
+        - --video-bitrate
+        - "{{ Param.VideoBitrate }}"
         - --out-dir
         - "{{ out_dir }}"
         - --label

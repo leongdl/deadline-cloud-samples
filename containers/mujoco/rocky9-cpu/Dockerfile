@@ -22,7 +22,19 @@ FROM rockylinux:9
 # because MuJoCo's Python renderer goes through PyOpenGL, which dlopens
 # libOpenGL.so.0 / libGL.so.1 and fails with a confusing NoneType error if
 # they are absent.
-RUN dnf install -y --setopt=install_weak_deps=False \
+# ffmpeg is not in the Rocky/RHEL 9 repositories at all -- RHEL drops it over
+# patent concerns -- so it comes from EPEL as `ffmpeg-free`, in a second dnf
+# transaction because the first one is what makes EPEL available.
+#
+# `ffmpeg-free` carries no libx264, and its libopenh264 support is dynamically
+# linked against a library that ships in a *separate* repo. Without the openh264
+# package below, `-c:v libopenh264` fails at encoder init with a misleading
+# "maybe incorrect parameters such as bit_rate, rate, width or height". Installing
+# it is what makes H.264 output work; mj-hand-sweep falls back to mpeg4 if it is
+# ever missing.
+RUN dnf install -y epel-release \
+    && dnf install -y --enablerepo=crb --setopt=install_weak_deps=False \
+        openh264 \
         python3.12 \
         python3.12-pip \
         git \
@@ -31,6 +43,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         mesa-dri-drivers \
         libglvnd-egl \
         libglvnd-opengl \
+        ffmpeg-free \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 

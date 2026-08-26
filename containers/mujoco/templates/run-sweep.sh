@@ -25,7 +25,7 @@
 #
 # Environment overrides:
 #   IMAGE=mujoco-rocky9        container image to run
-#   DURATION=5.0               simulated seconds per combination
+#   DURATION=2.0               simulated seconds per combination, and clip length
 #   FPS=20.0                   rendered frames per simulated second
 #   DOCKER_USER=<uid>:<gid>    defaults to the invoking user
 #   KEEP_SESSIONS=1            pass --preserve so session dirs survive (default 1)
@@ -46,7 +46,7 @@ LOG_DIR="$SESSIONS_DIR/logs"
 
 IMAGE="${IMAGE:-mujoco-rocky9}"
 CONTAINER_MOUNT="${CONTAINER_MOUNT:-/mnt/session}"
-DURATION="${DURATION:-5.0}"
+DURATION="${DURATION:-2.0}"
 FPS="${FPS:-20.0}"
 DOCKER_USER="${DOCKER_USER:-$(id -u):$(id -g)}"
 KEEP_SESSIONS="${KEEP_SESSIONS:-1}"
@@ -180,17 +180,19 @@ sweep_with() {
     echo "EXIT:$rc SECONDS:$((end - start))" >> "$log"
 
     # A zero exit code is not proof the sweep ran. Every combination must have
-    # produced a metrics.json and at least one frame.
-    local combos frames
+    # produced a metrics.json, at least one frame, and a non-empty MP4.
+    local combos frames clips
     combos=$(find "$run_dir" -name metrics.json 2>/dev/null | wc -l)
     frames=$(find "$run_dir" -name '*.png' 2>/dev/null | wc -l)
+    clips=$(find "$run_dir" -name 'clip.mp4' -size +0 2>/dev/null | wc -l)
 
-    if [ "$rc" -eq 0 ] && [ "$combos" -eq "$expected" ] && [ "$frames" -gt 0 ]; then
-        note "$impl: OK  $((end - start))s  $combos/$expected combinations, $frames frames"
-        RESULTS+=("$impl|PASS|$((end - start))|$combos/$expected|$frames|$log")
+    if [ "$rc" -eq 0 ] && [ "$combos" -eq "$expected" ] \
+       && [ "$clips" -eq "$expected" ] && [ "$frames" -gt 0 ]; then
+        note "$impl: OK  $((end - start))s  $combos/$expected combinations, $frames frames, $clips clips"
+        RESULTS+=("$impl|PASS|$((end - start))|$combos/$expected|$frames|$clips|$log")
     else
-        note "$impl: FAILED  rc=$rc  $((end - start))s  $combos/$expected combinations, $frames frames  see $log"
-        RESULTS+=("$impl|FAIL|$((end - start))|$combos/$expected|$frames|$log")
+        note "$impl: FAILED  rc=$rc  $((end - start))s  $combos/$expected combinations, $frames frames, $clips clips  see $log"
+        RESULTS+=("$impl|FAIL|$((end - start))|$combos/$expected|$frames|$clips|$log")
     fi
 }
 
@@ -229,11 +231,11 @@ case "$TARGET" in
 esac
 
 echo
-printf '%-8s %-6s %8s %14s %8s  %s\n' IMPL RESULT SECONDS COMBINATIONS FRAMES LOG
+printf '%-8s %-6s %8s %14s %8s %6s  %s\n' IMPL RESULT SECONDS COMBINATIONS FRAMES CLIPS LOG
 failures=0
 for row in ${RESULTS[@]+"${RESULTS[@]}"}; do
-    IFS='|' read -r impl status secs combos frames log <<< "$row"
-    printf '%-8s %-6s %8s %14s %8s  %s\n' "$impl" "$status" "$secs" "$combos" "$frames" "$log"
+    IFS='|' read -r impl status secs combos frames clips log <<< "$row"
+    printf '%-8s %-6s %8s %14s %8s %6s  %s\n' "$impl" "$status" "$secs" "$combos" "$frames" "$clips" "$log"
     [ "$status" = PASS ] || failures=$((failures + 1))
 done
 

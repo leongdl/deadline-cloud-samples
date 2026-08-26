@@ -40,14 +40,17 @@ editing a `range`.
 ./run-sweep.sh path         # whichever openjd is already on PATH
 ```
 
-Output lands in `sessions/output/<impl>/<combination>/`, one directory per sweep point:
+Output lands in `sessions/output/<impl>/<combination>/`, one directory per sweep point. Both the
+individual frames and the encoded clip are kept:
 
 ```text
 sessions/output/rust/damp4.0-kp2.0/
-├── frames/damp4.0-kp2.0-0000.png   ... 0099.png
-├── preview.gif
+├── frames/damp4.0-kp2.0-0000.png   ... 0039.png
+├── clip.mp4
 └── metrics.json
 ```
+
+`preview.gif` is also available, opt-in via `mj-hand-sweep --gif`; the MP4 supersedes it.
 
 Overrides, as environment variables: `IMAGE`, `DURATION`, `FPS`, `DOCKER_USER`, `KEEP_SESSIONS`,
 `VENV`, `RUST_BIN`.
@@ -59,8 +62,9 @@ Overrides, as environment variables: `IMAGE`, `DURATION`, `FPS`, `DOCKER_USER`, 
 | `DampingScale` | 0.5, 4.0 | Multiplier on hinge-joint damping, across the hand's 24 finger and wrist DOFs. Low is loose and oscillatory, high is sluggish. |
 | `StiffnessScale` | 0.5, 2.0 | Multiplier on the 20 position actuators' `kp`. Low underdrives the fingers so they never reach the commanded pose, high drives them hard into it. |
 
-Job parameters set the run rather than the sweep: `Duration` (default 5.0 simulated seconds),
-`Fps` (default 20), `Model`, `OutputSubdir`, `RunPrefix`, `ContainerMount`.
+Job parameters set the run rather than the sweep: `Duration` (default 2.0 simulated seconds, which
+is also the clip length), `Fps` (default 20), `VideoBitrate` (default `2M`), `Model`,
+`OutputSubdir`, `RunPrefix`, `ContainerMount`.
 
 The hand is driven through an open/close cycle by interpolating each actuator between its
 `ctrlrange` midpoint and its upper limit, so the motion stays inside every joint's declared range.
@@ -89,31 +93,42 @@ values, so a no-op parameter is visible in the artifact rather than invisible.
 
 ## Verified run
 
-Both implementations, on a 16-core x86_64 host, 5 simulated seconds per combination at 20 fps:
+Both implementations, on a 16-core x86_64 host, 2 simulated seconds per combination at 20 fps:
 
 ```
-IMPL     RESULT  SECONDS   COMBINATIONS   FRAMES
-python   PASS        108            4/4      400
-rust     PASS        107            4/4      400
+IMPL     RESULT  SECONDS   COMBINATIONS   FRAMES  CLIPS
+python   PASS         46            4/4      160      4
+rust     PASS         45            4/4      160      4
 ```
 
-Per combination — 2500 steps each, identical between the two implementations:
+Per combination — 1000 steps each, identical between the two implementations:
 
-| Combination | Frames | Steps | Peak flexion (rad) | Peak actuator force |
-|---|---|---|---|---|
-| `damp0.5-kp0.5` | 100 | 2500 | 1.620 | 0.781 |
-| `damp0.5-kp2.0` | 100 | 2500 | 1.609 | 1.095 |
-| `damp4.0-kp0.5` | 100 | 2500 | 1.392 | 1.321 |
-| `damp4.0-kp2.0` | 100 | 2500 | 1.582 | 1.504 |
+| Combination | Frames | Steps | Clip | MP4 bytes | Peak flexion (rad) | Peak actuator force |
+|---|---|---|---|---|---|---|
+| `damp0.5-kp0.5` | 40 | 1000 | 2.0 s | 282,987 | 1.598 | 0.781 |
+| `damp0.5-kp2.0` | 40 | 1000 | 2.0 s | 291,755 | 1.609 | 1.095 |
+| `damp4.0-kp0.5` | 40 | 1000 | 2.0 s | 252,927 | 1.300 | 1.321 |
+| `damp4.0-kp2.0` | 40 | 1000 | 2.0 s | 279,923 | 1.582 | 1.504 |
 
 The four points are physically distinct — peak actuator force nearly doubles across the sweep — and
 the frames differ visibly at the same time index.
 
+Every clip verified with `ffprobe` rather than by file size alone: `h264`, 480x360, 40 frames,
+duration exactly `2.000000`. The MP4s are byte-identical between the Python and Rust runs.
+
 ## Notes
 
-**Rendering is the cost, not the physics.** 2500 simulation steps take well under a second; the 100
-rendered frames are most of the ~22 s per combination, because rendering is software (llvmpipe). Drop
-`FPS` for a faster sweep, or raise it for smoother previews.
+**Rendering is the cost, not the physics or the encode.** 1000 simulation steps take well under a
+second and encoding 40 frames is milliseconds; the rendering is nearly all of the ~9 s per
+combination, because it is software (llvmpipe). Drop `Fps` for a faster sweep, or raise it for
+smoother clips.
+
+**H.264 needs a package from a second repo.** Rocky 9 has no ffmpeg at all, so the image takes
+`ffmpeg-free` from EPEL. That build has no libx264, and its libopenh264 support is dynamically
+linked against a library shipped in a *separate* repo (`epel-cisco-openh264`). Without the
+`openh264` package, `-c:v libopenh264` fails at encoder init with a misleading complaint about
+"bit_rate, rate, width or height". The image installs it, and `mj-hand-sweep` falls back to `mpeg4`
+if it is ever absent, recording which codec it used in `metrics.json`.
 
 **Friction is not swept, deliberately.** Contact friction is the obvious third axis, and the scene
 does put a free-floating ellipsoid in the palm, so it would have an effect. It is left out to keep
