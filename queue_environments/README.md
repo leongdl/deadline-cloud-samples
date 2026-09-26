@@ -4,7 +4,7 @@ Queue environments follow the [Open Job Description environment template specifi
 
 ## Sample index
 
-This table covers every queue environment YAML file in `queue_environments/`.
+This table covers every immediate user-selectable queue environment or collection in `queue_environments/`. Nested collections provide their own complete indexes.
 
 | Sample | What it demonstrates | Start here when |
 |---|---|---|
@@ -14,8 +14,10 @@ This table covers every queue environment YAML file in `queue_environments/`.
 | [Cached Conda environment](conda_queue_env_improved_caching.yaml) | Reusing hash-named environments with service-managed fleet commands | Repeated package sets should avoid relinking on every job |
 | [Cached inline Conda environment](conda_queue_env_inline_improved_caching.yaml) | Portable named-environment reuse and expiration logic | Customer-managed fleets need reusable Conda environments |
 | [Rez environment](rez_queue_env.yaml) | Resolving packages from a shared Rez repository | Your studio already distributes software with Rez |
+| [Rez shim environment](rez_shim/) | Wrapping each task in a resolved Rez context through `PATH` shims | Rez software needs shell functions, aliases, or ordered `PATH` edits |
 | [Pip environment](pip_queue_env.yaml) | Creating a Python `venv` and installing job-selected pip packages | Jobs need Python packages without Conda or Rez |
 | [Disconnect UBL](disconnect_ubl_queue_env.yaml) | Removing Deadline Cloud Usage Based License environment variables | A queue must use only a custom license server |
+| [Short path mapping junctions](windows_path_limit_junction_fix.yaml) | Junctioning job attachment directories to short paths and republishing path mapping rules through them | A Windows application fails on long input paths despite long path support |
 
 ## Create a queue environment for your queue
 
@@ -128,6 +130,12 @@ The cached inline sample implements the same idea with Conda environments identi
 
 The Rez sample resolves software from a shared package repository. Use it with customer-managed fleets that can access that repository.
 
+### Rez shim environment
+
+Choose the [Rez shim environment](rez_shim/) if your Rez packages configure software with anything other than plain environment variables, such as an `alias` for a launcher, a shell function, or a `PATH` prepend that must shadow a system binary. Those cannot cross out of a queue environment as `openjd_env` name-value pairs, so the sample above loses them. The shim environment instead wraps each task's command in the resolved context.
+
+It comes with test scaffolding and a verification job, so it lives in its own directory with a [dedicated README](rez_shim/README.md) covering deployment, tradeoffs, and the upstream RFC that will supersede it.
+
 ### Pip environment
 
 The pip sample uses Python's standard-library `venv` module to install `PipPackages` and activate the environment for subsequent steps. If `PipPackages` is empty it does nothing, allowing mixed queues. `PipIndexUrl` and `PipExtraIndexUrls` support private indexes such as [AWS CodeArtifact](https://docs.aws.amazon.com/codeartifact/).
@@ -137,3 +145,11 @@ Workers need `python3` or `python` on `PATH`. Service-managed fleets provide one
 ### Disconnect UBL
 
 The disconnect environment unsets Deadline Cloud Usage Based License variables so jobs use a custom license server. Give it a higher-precedence position than other environments, such as priority `0`, so later licensing setup is not removed. Review [Bring Your Own License](https://docs.aws.amazon.com/deadline-cloud/latest/developerguide/smf-byol.html). Additional UBL variables can be introduced over time, so review the template against current service behavior before deployment.
+
+### Short path mapping junctions
+
+Windows imposes a 260 character path limit, and applications that are not long-path-aware, such as Adobe After Effects and Cinema 4D, keep failing on longer paths even when long path support is enabled through the registry. Deadline Cloud downloads job attachments into a subdirectory of the session working directory whose name is a hash, which puts them roughly 107 characters deep before any project-relative path is added.
+
+This environment creates a Windows directory junction to each job attachment directory at a short numbered path, then writes a new [`pathmapping-1.0`](https://github.com/OpenJobDescription/openjd-specifications/wiki/How-Jobs-Are-Run#path-mapping) rules file whose destinations point through those junctions. The `DEADLINE_JUNCTION_PATHMAPS` environment variable names that file. It also writes a second `pathmapping-1.0` file that maps the directories directly to their junctions.
+
+The `DEADLINE_JUNCTION_PATHMAPS` file is a direct replacement for the session's own immutable path mapping rules file. For adaptors built on the [Open Job Description adaptor runtime](https://github.com/OpenJobDescription/openjd-adaptor-runtime-for-python), replacing `--path-mapping-rules file://{{Session.PathMappingRulesFile}}` with `--path-mapping-rules file://` plus the `DEADLINE_JUNCTION_PATHMAPS` value allows the adaptor to use the newly created junctions. For non-adaptor integrations such as the one for After Effects, the path mapping rules defined in `DEADLINE_JUNCTIONS` can be applied on top of the existing path mapping rules. If neither set of path mapping rules is applied, then the job falls back to the session's original long paths without utilizing the junctions that this queue environment creates.

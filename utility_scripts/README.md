@@ -9,6 +9,7 @@ This table covers every immediate user-selectable sample directory in `utility_s
 | Sample | What it demonstrates | Start here when |
 |---|---|---|
 | [Upload to job attachments](upload_to_job_attachments/) | Uploading files into content-addressable job attachment storage with deduplication | Large or reused datasets should be staged before job submission |
+| [Virtual workstation](virtual_workstation/) | Provisioning a Linux or Windows workstation with a DCC, the Deadline Cloud submitter, and a pre-configured monitor profile | Artists should find a submission-ready machine and only need to sign in |
 
 ## Upload to job attachments
 
@@ -37,6 +38,21 @@ python upload_to_job_attachments/upload_to_job_attachments.py \
 ```
 
 See the [sample README](upload_to_job_attachments/) for installation, permissions, options, and manifest details.
+
+## Virtual workstation
+
+Example scripts for Linux and Windows prepare a workstation for Deadline Cloud submission. Each one installs Blender, then installs the Deadline Cloud submitter and monitor through their silent installers. It finishes by creating a monitor profile non-interactively, so an artist only has to sign in.
+
+```console
+# Linux, as root. Add the artist's account when there is no SUDO_USER to infer,
+# as under EC2 user data.
+sudo virtual_workstation/setup_workstation_linux.sh https://mystudio.us-west-2.deadlinecloud.amazonaws.com/
+
+# Windows, in an elevated PowerShell session as the artist's own account
+.\virtual_workstation\setup_workstation_windows.ps1 https://mystudio.us-west-2.deadlinecloud.amazonaws.com/
+```
+
+Blender stands in for whichever DCC you run. See the [sample README](virtual_workstation/) for prerequisites, adapting the scripts to another DCC, and cleanup.
 
 ## Additional resources
 

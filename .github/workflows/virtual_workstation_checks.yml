@@ -1,0 +1,159 @@
+name: Virtual Workstation Checks
+
+# Runs the virtual_workstation sample end to end on both platforms, so a change
+# to it is proven to still produce a working workstation rather than only to
+# still parse. Separate from static_checks.yml, which is offline and fast.
+#
+# Not for the required status checks: path-filtered runs report no status, and
+# every download comes from a third-party endpoint. The weekly run catches a new
+# submitter or monitor release breaking the sample, since both resolve "latest".
+on:
+  pull_request:
+    branches: ["mainline"]
+    paths:
+      - "utility_scripts/virtual_workstation/**"
+      - ".github/workflows/virtual_workstation_checks.yml"
+  push:
+    branches: ["mainline"]
+    paths:
+      - "utility_scripts/virtual_workstation/**"
+      - ".github/workflows/virtual_workstation_checks.yml"
+  schedule:
+    - cron: "23 9 * * 2"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: virtual-workstation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Shape-valid but nonexistent: create-profile does not contact the URL.
+  MONITOR_URL: "https://ci-example.us-west-2.deadlinecloud.amazonaws.com/"
+  PROFILE_NAME: "ci-example-us-west-2"
+
+jobs:
+  linux:
+    name: Ubuntu 22.04
+    runs-on: ubuntu-latest
+    # The sample pins Ubuntu 22.04, the last release with libwebkit2gtk-4.0-37.
+    # A container, not the ubuntu-22.04 runner label, which retires in 2027.
+    container: ubuntu@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    # A bare container resolves "sh -e {0}" for every step, which has no pipefail.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Stands in for the desktop environment the sample requires. shell: sh
+      # because this step is what installs bash.
+      - name: Install prerequisites
+        shell: sh
+        run: |
+          set -eu
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            bash git sudo ca-certificates \
+            libx11-6 libxi6 libxxf86vm1 libxfixes3 libxrender1 libxext6 \
+            libxkbcommon0 libsm6 libice6 libgl1 libegl1 libglu1-mesa libdbus-1-3 \
+            libglib2.0-0 libfontconfig1 libfreetype6 \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+            libxcb-xkb1
+
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Create the artist account
+        run: useradd --create-home artist
+
+      - name: Run the setup script
+        working-directory: utility_scripts/virtual_workstation
+        run: ./setup_workstation_linux.sh "$MONITOR_URL" artist
+
+      # Assert against the machine, since the script self-verifies.
+      - name: Verify the workstation
+        run: |
+          set -euo pipefail
+          /opt/blender/blender --version
+          sudo -u artist -H /opt/blender/blender --background --python-expr \
+            'import bpy, sys; sys.exit(0 if "deadline_cloud_blender_submitter" in bpy.context.preferences.addons.keys() else 1)'
+          # A login shell: the submitter sets PATH via /etc/profile.d.
+          sudo -u artist -H bash -lc 'deadline --version'
+          grep -qF "[profile ${PROFILE_NAME}]" /home/artist/.aws/config
+          # Empty monitor_id makes the monitor drop the profile from its picker.
+          grep -qE '^monitor_id[[:space:]]*=[[:space:]]*.+$' /home/artist/.aws/config
+
+  windows:
+    name: Windows Server 2022 (${{ matrix.label }})
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # 5.1 is the default on a Windows workstation and differs from 7 in how
+        # native stderr and Invoke-WebRequest behave. Invoked from run: rather
+        # than shell:, which takes no expression.
+        include:
+          - exe: powershell
+            label: Windows PowerShell 5.1
+          - exe: pwsh
+            label: PowerShell 7
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run the setup script
+        shell: pwsh
+        working-directory: utility_scripts/virtual_workstation
+        env:
+          PS_EXE: ${{ matrix.exe }}
+        run: |
+          & $env:PS_EXE -NoProfile -File .\setup_workstation_windows.ps1 $env:MONITOR_URL
+          if ($LASTEXITCODE -ne 0) { throw "the setup script exited $LASTEXITCODE" }
+
+      - name: Verify the workstation
+        shell: pwsh
+        run: |
+          $blender = "C:\Program Files\Blender\blender.exe"
+          & $blender --version
+          if ($LASTEXITCODE -ne 0) { throw "Blender did not run" }
+
+          # A file, not --python-expr: PowerShell drops the inner quotes.
+          Set-Content -Path check_addon.py -Encoding ASCII -Value @'
+          import bpy
+          import sys
+
+          sys.exit(0 if "deadline_cloud_blender_submitter" in bpy.context.preferences.addons.keys() else 1)
+          '@
+          & $blender --background --python check_addon.py | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "the Blender add-on is not registered" }
+
+          $config = Join-Path $env:USERPROFILE ".aws\config"
+          if (-not (Select-String -Path $config -SimpleMatch -Quiet -Pattern "[profile $env:PROFILE_NAME]")) {
+            throw "the profile stanza is missing from $config"
+          }
+          # Empty monitor_id makes the monitor drop the profile from its picker.
+          if (-not (Select-String -Path $config -Quiet -Pattern '^monitor_id\s*=\s*.+$')) {
+            throw "monitor_id is empty"
+          }
+
+      # The script keeps its downloads on failure so installer logs survive.
+      - name: Collect installer logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: installer-logs-${{ matrix.exe }}
+          path: ${{ runner.temp }}\deadline-workstation-setup
+          if-no-files-found: ignore
+          retention-days: 7
